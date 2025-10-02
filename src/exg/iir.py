@@ -17,9 +17,9 @@ class IIR:
         sos_bp = self.design_bandpass_filter(self.fs, lowpass_fs, highpass_fs, order=filter_order)
         
         # Design all notch filters
-        sos_notch_list = [self.design_bandstop_filter(self.fs, nf-4, nf+4, order=2) 
+        sos_notch_list = [self.design_bandstop_filter(self.fs, nf-10, nf+10, order=filter_order*2) 
                           for nf in notch_fs_list]
-        # sos_notch_list = [self.design_notch_filter(self.fs, nf, quality_factor=7)
+        # sos_notch_list = [self.design_notch_filter(self.fs, nf, quality_factor=5)
         #                     for nf in notch_fs_list]
         
         # Combine all SOS arrays: bandpass first, then all notch filters

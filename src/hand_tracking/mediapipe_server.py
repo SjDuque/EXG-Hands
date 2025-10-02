@@ -25,77 +25,12 @@ target_display_fps = 30
 frame_time_display = 1.0 / target_display_fps
 frame_time_process = 1.0 / target_mp_fps
 stop_event = threading.Event()
-prompt_index = 0
-last_prompt_switch_time = time.perf_counter()
 
 display_frame = None
 display_q = queue.Queue(maxsize=2)
 process_q = queue.Queue(maxsize=2)
 landmark_q = queue.Queue(maxsize=2)
 display_landmark_q = queue.Queue(maxsize=2)
-
-prompt_labels = ['thumb', 'index', 'middle', 'ring', 'pinky']
-prompt_labels_idx = {label: i for i, label in enumerate(prompt_labels)}
-prompt_groups = ['thumb', 'index', 'middle', ['ring', 'pinky']]
-
-def generate_prompt_lists():
-    result = []
-    num_groups = len(prompt_groups)
-
-    for num_true in range(num_groups + 1):
-        for combo in combinations(range(num_groups), num_true):
-            prompt = [False] * len(prompt_labels)
-            for group_index in combo:
-                group = prompt_groups[group_index]
-                if isinstance(group, list):
-                    for label in group:
-                        prompt[prompt_labels_idx[label]] = True
-                else:
-                    prompt[prompt_labels_idx[group]] = True
-            result.append(prompt)
-    return result
-
-prompt_lists = generate_prompt_lists()
-prompt_switch_interval = 5  # seconds
-
-current_prompt = prompt_lists[0] if prompt_lists else [False] * 5
-
-def draw_prompt_circles(image, prompt, prompt_labels):
-    radius = 20
-    num_circles = len(prompt)
-    image_width = image.shape[1]
-    margin = 50
-    if num_circles > 1:
-        total_spacing = image_width - 2 * margin - (2 * radius * num_circles)
-        spacing = total_spacing / (num_circles - 1)
-    else:
-        spacing = 0
-    center_y = 50
-    label_offset = 25
-    red = (0, 0, 255)
-    green = (0, 255, 0)
-    black = (0, 0, 0)
-
-    for i in range(num_circles):
-        center_x = int(margin + i * (2 * radius + spacing))
-        color = green if prompt[i] else red
-        cv2.circle(image, (center_x, center_y), radius, color, -1)
-
-        label = prompt_labels[i]
-        font_scale = 0.5
-        text_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 1)
-        text_x = center_x - text_size[0] // 2
-        text_y = center_y + radius + label_offset
-        cv2.putText(image, label, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, 1)
-
-        text = 'up' if prompt[i] else 'down'
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.5
-        thickness = 2
-        text_size, _ = cv2.getTextSize(text, font, font_scale, thickness)
-        text_x = center_x - text_size[0] // 2
-        text_y = center_y + text_size[1] // 2
-        cv2.putText(image, text, (text_x, text_y), font, font_scale, black, thickness)
 
 def capture_camera_frames(stop_event, target_fps, resolution):
     global process_q, display_q
@@ -356,35 +291,6 @@ def lsl_mp_stream(stop_event):
                 # Continue without sleeping to catch up
                 pass
 
-def lsl_prompt_stream(stop_event):
-    global current_prompt, prompt_index
-    
-    # Create LSL StreamInfo for prompt
-    
-    prompt_info = pylsl.StreamInfo('finger_prompt', 'Markers', len(prompt_labels), 1/prompt_switch_interval, 'int8', 'finger_prompt')
-
-    # Add channel labels to the stream's description
-    channels = prompt_info.desc().append_child("channels")
-    for name in prompt_labels:
-        channels.append_child("channel").append_child_value("label", name)
-
-    # Create the LSL outlet
-    prompt_outlet = pylsl.StreamOutlet(prompt_info)
-
-    while not stop_event.is_set():
-        # Convert boolean prompt to integers (0 or 1) for LSL
-        prompt_int = [int(prompt) for prompt in current_prompt]
-        # Send the prompt via LSL
-        prompt_outlet.push_sample(prompt_int)
-        # Wait for the switch interval
-        time.sleep(prompt_switch_interval)
-        if prompt_index == 1:
-            np.random.shuffle(prompt_lists)
-        # Update the prompt index
-        prompt_index = (prompt_index + 1) % len(prompt_lists)
-        current_prompt = prompt_lists[prompt_index]
-        print(f"Switched to prompt list index {prompt_index}")
-
 def main():
     global stop_event, current_prompt, prompt_index, last_prompt_switch_time
 
@@ -411,14 +317,6 @@ def main():
         daemon=True
     )
     lsl_mp_thread.start()
-
-    # Start the LSL prompt stream thread
-    lsl_prompt_thread = threading.Thread(
-        target=lsl_prompt_stream,
-        args=(stop_event,),
-        daemon=True
-    )
-    lsl_prompt_thread.start()
 
     # Remove the existing prompt update logic from the main loop
     # np.random.shuffle(prompt_lists)  # Already shuffled in prompt_update_thread
@@ -450,9 +348,6 @@ def main():
                         mp.solutions.drawing_styles.get_default_hand_landmarks_style(),
                         mp.solutions.drawing_styles.get_default_hand_connections_style()
                     )
-
-            # Draw prompt circles based on the current_prompt
-            draw_prompt_circles(display_frame, current_prompt, prompt_labels)
             cv2.imshow('Hand Tracking Server', display_frame)
             if cv2.waitKey(1) & 0xFF == 27:
                 stop_event.set()
@@ -473,7 +368,6 @@ def main():
         camera_thread.join()
         mp_process_thread.join()
         lsl_mp_thread.join()
-        lsl_prompt_thread.join()
         cv2.destroyAllWindows()
         print("Program terminated gracefully.")
 

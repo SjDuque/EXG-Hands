@@ -26,6 +26,7 @@ class LSLWorker(QThread):
             sample, _ = inlet.pull_sample(timeout=0.0)
             if sample:
                 self.target_pose = [1 - float(x) for x in sample]
+                QApplication.beep()
             for i in range(5):
                 self.current_pose[i] += self.smoothing * (self.target_pose[i] - self.current_pose[i])
             self.pose_updated.emit(self.current_pose)

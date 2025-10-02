@@ -30,7 +30,7 @@ class LSLGraphPlotter(BaseGraph):
 
         # Initialize the base graph
         super().__init__(
-            title='LSL Filtered Stream Plotter',
+            title=f'LSL {self.stream_name} Stream',
             window_size=5,
             sampling_rate=self.sampling_rate,
             num_channels=self.num_channels

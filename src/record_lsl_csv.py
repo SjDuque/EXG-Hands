@@ -6,7 +6,7 @@ import csv
 import re
 import json
 
-SESSION_DIR = "data/s_05_01_25"
+SESSION_DIR = "data/s_05_14_25"
 
 class LSLRecorder:
     """

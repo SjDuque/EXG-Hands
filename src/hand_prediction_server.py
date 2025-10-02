@@ -10,7 +10,7 @@ import pylsl
 import json
 
 # Path to the trained model
-MODEL_DIR = "data/s_05_04_25/models/model_0"
+MODEL_DIR = "data/s_05_14_25/models/model_0"
 
 
 class HandPredictionServer:
@@ -111,7 +111,7 @@ class HandPredictionServer:
         :return: Normalized data.
         """
         # Normalize using pre-loaded mean and std
-        normalized = data / self.std
+        normalized = (data - self.mean) / self.std
         return normalized
 
     def predict(self):

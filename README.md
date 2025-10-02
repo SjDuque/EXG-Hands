@@ -134,7 +134,8 @@ https://github.com/user-attachments/assets/08382008-1f0d-4633-aaa4-c096e12325b7
 
 ## ✅ TODO
 
-- [ ] Make each server/client threadable
+- [ ] Make each non-gui server/client threadable
+- [ ] Make each gui server/client a QT Widget
 - [ ] Create a unified launcher for all services
 - [ ] Combine training and real-time inference with mode toggle
 

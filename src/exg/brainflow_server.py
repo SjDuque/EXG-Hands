@@ -10,7 +10,7 @@ import threading
 
 from iir import IIR
 
-BOARD_ID = BoardIds.SYNTHETIC_BOARD  # Default to synthetic board for testing
+BOARD_ID = BoardIds.CYTON_BOARD  # Default to synthetic board for testing
 
 class BrainFlowServer(threading.Thread):
     def __init__(self, fps:int=None, board_id:BoardIds=BoardIds.SYNTHETIC_BOARD, is_emg:bool=False, 
@@ -160,7 +160,7 @@ class BrainFlowServer(threading.Thread):
             POWER_DOWN = 0  # EMG is 0 = Normal operation
             GAIN_SET = 6    # EMG is 6 = Gain 24
             INPUT_TYPE_SET = 0  # EMG is 0 = Normal electrode input
-            BIAS_SET = 1    # EMG is 1
+            BIAS_SET = 0    # EMG is 1
             SRB2_SET = 0    # EMG is 0
             SRB1_SET = 0    # EMG is 0
             
