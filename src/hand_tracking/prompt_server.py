@@ -4,7 +4,7 @@ import pylsl
 from itertools import combinations
 import threading
 
-class FingerPromptStreamer(threading.Thread):
+class PromptServer(threading.Thread):
     def __init__(self, prompt_switch_interval=5):
         super().__init__()
         self.prompt_switch_interval = prompt_switch_interval
@@ -12,7 +12,7 @@ class FingerPromptStreamer(threading.Thread):
         self.prompt_labels_idx = {label: i for i, label in enumerate(self.prompt_labels)}
         self.prompt_groups = ['thumb', 'index', 'middle', ['ring', 'pinky']]
         self.prompt_lists = self.generate_prompt_lists()
-        self.prompt_index = 0
+        self.prompt_index = -1
         self.running = False
 
         # LSL setup
@@ -57,7 +57,7 @@ class FingerPromptStreamer(threading.Thread):
             time.sleep(self.prompt_switch_interval)
 
             self.prompt_index = (self.prompt_index + 1) % len(self.prompt_lists)
-            if self.prompt_index == 1:
+            if self.prompt_index == 0:
                 np.random.shuffle(self.prompt_lists)
             current_prompt = self.prompt_lists[self.prompt_index]
 
@@ -66,12 +66,12 @@ class FingerPromptStreamer(threading.Thread):
         self.running = False
 
 if __name__ == "__main__":
-    streamer = FingerPromptStreamer()
+    streamer = PromptServer()
     streamer.start()
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        print("Stopping FingerPromptStreamer...")
+        print("Stopping PromptServer...")
         streamer.stop()
         streamer.join()

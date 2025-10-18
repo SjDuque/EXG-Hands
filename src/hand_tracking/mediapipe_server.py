@@ -412,7 +412,7 @@ def main():
     )
     lsl_mp_thread.start()
 
-    # Start the LSL prompt stream thread
+    # Start the LSL prompt server thread
     lsl_prompt_thread = threading.Thread(
         target=lsl_prompt_stream,
         args=(stop_event,),

@@ -5,8 +5,58 @@ import os
 import csv
 import re
 import json
+import threading
+import logging
+from typing import Optional
+from PyQt5 import QtCore, QtWidgets
 
-SESSION_DIR = "data/s_05_01_25"
+
+SESSION_DIR = "data/s_MM_DD_HH"
+
+class RecorderWorker(QtCore.QThread):
+    """Background worker that persists LSL streams to disk."""
+
+    status_changed = QtCore.pyqtSignal(str)
+
+    def __init__(
+        self,
+        streams: dict[str, str],
+        session_dir: str,
+        update_interval: float = 0.1,
+        parent: Optional[QtCore.QObject] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.streams = streams
+        self.session_dir = session_dir
+        self.update_interval = max(update_interval, 0.05)
+        self._stop_requested = threading.Event()
+        self._recorder: Optional[LSLRecorder] = None
+
+    def run(self) -> None:  # type: ignore[override]
+        try:
+            self.status_changed.emit("Recorder: initialising streams…")
+            self._recorder = LSLRecorder(
+                streams=self.streams,
+                session_dir=self.session_dir,
+                update_interval=self.update_interval,
+            )
+            self.status_changed.emit("Recorder: running")
+            while not self._stop_requested.is_set():
+                self._recorder.update()
+                self.msleep(int(self.update_interval * 1000))
+        except Exception as exc:  # pragma: no cover - surfaced to UI
+            logging.exception("Recorder worker failed")
+            self.status_changed.emit(f"Recorder error: {exc}")
+        finally:
+            if self._recorder:
+                self._recorder.close()
+                self._recorder = None
+            self.status_changed.emit("Recorder: stopped")
+
+    def stop(self) -> None:
+        self._stop_requested.set()
+        self.wait(2000)
+
 
 class LSLRecorder:
     """
@@ -49,7 +99,7 @@ class LSLRecorder:
         os.makedirs(recording_dir, exist_ok=True)
 
         self._configs = {}
-        
+
         freq_info = {}
 
         for key, name in self.streams.items():
@@ -79,21 +129,24 @@ class LSLRecorder:
                 labels = [f"{key}_{i+1}" for i in range(nch)]
             writer.writerow(['timestamp'] + labels)
 
-            self._configs[key] = {'inlet': inlet, 'writer': writer, 'file': f}
+            self._configs[key] = {
+                'inlet': inlet,
+                'writer': writer,
+                'file': f
+            }
             print(f"[{key}] writing to {fname} with channels {labels}")
-            
+
         # Write recording info to json file
-        info_fname = os.path.join(session_dir, "frequency_info.json")
-        # If the file already exists, load existing data
+        info_fname = os.path.join(self.session_dir, "frequency_info.json")
         if os.path.exists(info_fname):
             with open(info_fname, 'r') as f:
-                freq_info = json.load(f)
-                # Compare the new data with the existing data, if they are different, raise an error
-                if freq_info != freq_info:
-                    raise RuntimeError(f"Frequency info file {info_fname} already exists and is different from the new data.")
+                existing = json.load(f)
+            if existing != freq_info:
+                raise RuntimeError(
+                    f"Frequency info file {info_fname} already exists and does not match the current stream info."
+                )
             print(f"Frequency info file {info_fname} already exists.")
         else:
-            # If the file does not exist, create it
             with open(info_fname, 'w') as f:
                 json.dump(freq_info, f, indent=4)
             print(f"Frequency info file {info_fname} created.")
@@ -110,6 +163,15 @@ class LSLRecorder:
                     cfg['writer'].writerow(row)
                 cfg['file'].flush()
 
+    def close(self):
+        """Close any open file handles and clear configuration."""
+        for cfg in self._configs.values():
+            try:
+                cfg['file'].close()
+            except Exception:
+                pass
+        self._configs.clear()
+
     def collect_and_close(self):
         """Continuously update until interrupted, then close files."""
         print("Start recording. Press Ctrl+C to stop.")
@@ -119,8 +181,7 @@ class LSLRecorder:
                 time.sleep(self.update_interval)
         except KeyboardInterrupt:
             print("\nStopping and closing files...")
-            for cfg in self._configs.values():
-                cfg['file'].close()
+            self.close()
             print("All files closed.")
 
 

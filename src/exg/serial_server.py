@@ -1,67 +1,57 @@
 #!/usr/bin/env python3
-import sys
-import time
-import logging
-import threading
 import argparse
+import logging
+import time
 from collections import deque
+from collections.abc import Sequence
 
 import numpy as np
 import serial
-import serial.tools.list_ports
-from pylsl import StreamInfo, StreamOutlet, local_clock
+from pylsl import local_clock
 
-from iir import IIR  # your existing filter
+from .base_exg_server import BaseExgServer, resolve_serial_port
 
-DEFAULT_BAUD = 115200
 CHUNK_SAMPLES = 4        # push to LSL in small chunks
 FALLBACK_FPS = 250.0       # used until we estimate from timestamps
 
-def find_circuitpy_port() -> str | None:
-    """
-    Try to locate the CircuitPython USB-CDC serial port.
-    Preference order:
-      - desc/manufacturer mentions 'CircuitPython' or 'Adafruit'
-      - macOS usbmodem
-      - generic USB serial candidates
-    """
-    candidates = []
-    for p in serial.tools.list_ports.comports():
-        desc = f"{p.description}".lower()
-        manu = f"{p.manufacturer}".lower() if p.manufacturer else ""
-        if "circuitpython" in desc or "circuitpython" in manu or "adafruit" in manu:
-            return p.device
-        if "usbmodem" in p.device.lower():
-            candidates.append(p.device)
-        elif "usbserial" in p.device.lower():
-            candidates.append(p.device)
-    return candidates[0] if candidates else None
 
-
-class CircuitPySerialServer(threading.Thread):
-    def __init__(self, port:str|None=None, baud:int=DEFAULT_BAUD, fps:float|None=None,
-                 lsl_raw:bool=True, lsl_filtered:bool=True, include_channels:list[int]|None=None):
-        super().__init__(daemon=True)
-        self.log = logging.getLogger("CircuitPySerialServer")
-        self.port = port or find_circuitpy_port()
-        if not self.port:
-            raise RuntimeError("No CircuitPython serial port found. Pass --port explicitly.")
+class CircuitPySerialServer(BaseExgServer):
+    def __init__(
+        self,
+        serial_port: str | None = None,
+        baud: int = 115200,
+        fps: float | None = None,
+        lsl_raw: bool = True,
+        lsl_filtered: bool = True,
+        include_channels: list[int] | None = None,
+        lowpass_fs: float | None = None,
+        highpass_fs: float | None = None,
+        notch_fs_list: list[float] | None = None,
+    ) -> None:
+        super().__init__(
+            name="CircuitPySerialServer",
+            fps=fps,
+            include_channels=include_channels,
+            lsl_raw=lsl_raw,
+            lsl_filtered=lsl_filtered,
+            lowpass_fs=lowpass_fs,
+            highpass_fs=highpass_fs,
+            notch_fs_list=notch_fs_list,
+            source_id="CircuitPyLSL",
+            daemon=True,
+        )
+        # Serial config
+        self.serial_port = resolve_serial_port(
+            serial_port,
+            desc="CircuitPython",
+            manu="Adafruit",
+        )
+        if not self.serial_port:
+            raise RuntimeError("No serial port found. Pass --port explicitly.")
         self.baud = baud
         self.target_fps = fps  # if None, estimate from incoming data
-        self.include_channels = include_channels
-        self.lsl_raw = lsl_raw
-        self.lsl_filtered = lsl_filtered
 
         self.ser = None
-        self.running = False
-
-        # will be set after first line is parsed
-        self.num_channels = None
-        self.fs_for_filter = None
-        self.iir = None
-
-        self.raw_outlet = None
-        self.filt_outlet = None
 
         # Buffers
         self.raw_buf = deque(maxlen=4096)
@@ -70,51 +60,15 @@ class CircuitPySerialServer(threading.Thread):
         # For dynamic FPS estimation
         self._last_arrival = None
         self._intervals = deque(maxlen=200)
+        self._configured = False
+        self._filter_fs = None
 
     # ---------- Setup ----------
-    def open_serial(self):
-        self.ser = serial.Serial(self.port, self.baud, timeout=1)
-        self.log.info(f"Opened serial: {self.port} @ {self.baud}")
-
-    def init_lsl_outlets(self):
-        ch_count = self.num_channels
-        # Names match your BrainFlow version for drop-in use in LSL viewers
-        if self.lsl_raw:
-            info = StreamInfo(
-                name="raw_exg",
-                type="EXG",
-                channel_count=ch_count,
-                nominal_srate=self.fs_for_filter,
-                channel_format="float32",
-                source_id="CircuitPyLSL"
-            )
-            self.raw_outlet = StreamOutlet(info)
-            self.log.info("LSL raw_exg outlet created.")
-        if self.lsl_filtered:
-            infof = StreamInfo(
-                name="filtered_exg",
-                type="EXG",
-                channel_count=ch_count,
-                nominal_srate=self.fs_for_filter,
-                channel_format="float32",
-                source_id="CircuitPyLSL"
-            )
-            self.filt_outlet = StreamOutlet(infof)
-            self.log.info("LSL filtered_exg outlet created.")
-
-    def init_filter(self):
-        ch = self.num_channels
-        fs = float(self.fs_for_filter)
-        # Keep your original choices: HP=10 Hz, LP=Nyquist, Notch 50/60
-        self.iir = IIR(
-            num_channels=ch,
-            fs=fs,
-            lowpass_fs=fs/2.0,
-            highpass_fs=15.0,
-            notch_fs_list=[60],
-            filter_order=4
-        )
-        self.log.info(f"IIR initialized with fs={fs:.3f} Hz, channels={ch}")
+    def _ensure_serial(self) -> None:
+        if self.ser and self.ser.is_open:
+            return
+        self.ser = serial.Serial(self.serial_port, self.baud, timeout=1)
+        self.log.info("Opened serial: %s @ %d", self.serial_port, self.baud)
 
     # ---------- Helpers ----------
     def _estimate_fps(self, now):
@@ -124,94 +78,86 @@ class CircuitPySerialServer(threading.Thread):
         if self.target_fps is not None:
             return self.target_fps
         if len(self._intervals) >= 20:
-            mean_dt = sum(self._intervals)/len(self._intervals)
+            mean_dt = sum(self._intervals) / len(self._intervals)
             if mean_dt > 0:
-                return 1.0/mean_dt
+                return 1.0 / mean_dt
         return FALLBACK_FPS
 
-    def _select_channels(self, arr:np.ndarray) -> np.ndarray:
-        if self.include_channels:
-            return arr[:, self.include_channels]
-        return arr
-
-    def _maybe_init_after_first_line(self, sample:list[float], fps_hint:float):
-        if self.num_channels is None:
-            self.num_channels = len(sample) if not self.include_channels else len(self.include_channels)
-            self.fs_for_filter = fps_hint if fps_hint is not None else FALLBACK_FPS
-            self.init_lsl_outlets()
-            self.init_filter()
-
-    # ---------- Main loop ----------
-    def run(self):
-        self.running = True
-        self.open_serial()
-        self.log.info("Start reading serial and streaming to LSL.")
+    def _parse_sample(self, line: bytes) -> list[float] | None:
+        if not line:
+            return None
         try:
-            while self.running:
-                line = self.ser.readline()
-                if not line:
-                    continue
-                try:
-                    text = line.decode("utf-8", errors="ignore").strip()
-                    if not text:
-                        continue
-                    # Accept CSV or single integer
-                    parts = text.split(",")
-                    sample = [float(p) for p in parts]
-                except Exception:
-                    # skip malformed line
-                    continue
+            text = line.decode("utf-8", errors="ignore").strip()
+            if not text:
+                return None
+            return [float(part) for part in text.split(",")]
+        except Exception:
+            return None
 
-                now = local_clock()
-                fps = self._estimate_fps(now)
-                self._maybe_init_after_first_line(sample, fps)
+    def _acquire_samples(self) -> tuple[np.ndarray, Sequence[float]] | None:
+        self._ensure_serial()
 
-                # channel selection
-                if self.include_channels:
-                    sample_np = np.array(sample, dtype=np.float32)[self.include_channels]
-                else:
-                    sample_np = np.array(sample, dtype=np.float32)
+        line = self.ser.readline()
+        sample = self._parse_sample(line)
+        if sample is None:
+            return None
 
-                self.raw_buf.append(sample_np)
-                self.ts_buf.append(now)
+        latest_sample = sample
+        latest_time = local_clock()
 
-                # push in small chunks
-                if len(self.raw_buf) >= CHUNK_SAMPLES:
-                    raw_chunk = np.stack([self.raw_buf.popleft() for _ in range(CHUNK_SAMPLES)], axis=0)
-                    ts_chunk = [self.ts_buf.popleft() for _ in range(CHUNK_SAMPLES)]
+        # Drain any backlog so we always operate on the freshest data.
+        while self.ser.in_waiting:
+            next_line = self.ser.readline()
+            parsed = self._parse_sample(next_line)
+            if parsed is None:
+                continue
+            latest_sample = parsed
+            latest_time = local_clock()
 
-                    # Update filter’s fs occasionally if our estimate drifts a lot
-                    if abs(fps - self.fs_for_filter) / max(self.fs_for_filter, 1e-6) > 0.2:
-                        self.fs_for_filter = fps
-                        self.init_filter()  # re-init to keep behavior sane
+        fps_estimate = self._estimate_fps(latest_time)
+        if not self._configured:
+            fs = fps_estimate if fps_estimate is not None else FALLBACK_FPS
+            self.configure_processing(sample_rate=fs, input_channel_count=len(latest_sample))
+            self._configured = True
+            self._filter_fs = fs
+        elif (
+            self._filter_fs is not None
+            and abs(fps_estimate - self._filter_fs) / max(self._filter_fs, 1e-6) > 0.2
+        ):
+            self._filter_fs = fps_estimate
+            self.update_filter(sample_rate=fps_estimate)
 
-                    # Filter
-                    filt_chunk = self.iir.process(raw_chunk)
+        if not self._configured:
+            return None
 
-                    # LSL: both chunks are (num_samples, num_channels)
-                    if self.raw_outlet:
-                        self.raw_outlet.push_chunk(raw_chunk.tolist(), ts_chunk)
-                    if self.filt_outlet:
-                        self.filt_outlet.push_chunk(filt_chunk.tolist(), ts_chunk)
+        sample_np = np.asarray(latest_sample, dtype=np.float32)
+        self.raw_buf.append(sample_np)
+        self.ts_buf.append(latest_time)
 
-        except Exception as e:
-            self.log.exception(f"Server error: {e}")
-        finally:
-            try:
-                if self.ser and self.ser.is_open:
-                    self.ser.close()
-            except Exception:
-                pass
-            self.log.info("Serial closed. Exiting thread.")
+        if len(self.raw_buf) >= CHUNK_SAMPLES:
+            raw_chunk = np.stack(
+                [self.raw_buf.popleft() for _ in range(CHUNK_SAMPLES)],
+                axis=0,
+            )
+            ts_chunk = [self.ts_buf.popleft() for _ in range(CHUNK_SAMPLES)]
+            return raw_chunk, ts_chunk
 
-    def stop(self):
-        self.running = False
+        return None
+
+    def close(self):
+        try:
+            if self.ser and self.ser.is_open:
+                self.ser.close()
+        except Exception:
+            pass
+        self.log.info("Serial closed. Exiting thread.")
+        super().close()
 
 
 def main():
     parser = argparse.ArgumentParser(description="CircuitPython Serial → LSL with IIR filtering")
     parser.add_argument("--port", type=str, default=None, help="Serial port (auto-detect if omitted)")
-    parser.add_argument("--baud", type=int, default=DEFAULT_BAUD, help="Serial baudrate")
+    parser.add_argument("--baud", type=int, default=115200, help="Serial baudrate")
     parser.add_argument("--fps", type=float, default=None, help="Sampling rate hint (Hz); else estimate")
     parser.add_argument("--include", type=str, default=None,
                         help="Comma-separated channel indices to include (e.g. 0,2)")
@@ -229,7 +175,7 @@ def main():
         include_channels = [int(x) for x in args.include.split(",")]
 
     server = CircuitPySerialServer(
-        port=args.port,
+        serial_port=args.port,
         baud=args.baud,
         fps=args.fps,
         lsl_raw=not args.no_raw,
